@@ -43,6 +43,13 @@
     }
     return "";
   }
+  const squash = (x) => norm(x).replace(/[^a-z0-9]/g, "");
+  const extraFor = (m, k) => {
+    if (m[k] != null) return m[k];
+    const nk = squash(k); if (nk.length < 4) return undefined;
+    for (const q of Object.keys(m)) { const nq = squash(q); if (nq === nk || (nq.length > 12 && nk.length > 12 && (nq.includes(nk) || nk.includes(nq)))) return m[q]; }
+    return undefined;
+  };
   const pastEmployer = (company) => { const c = norm(company).split(/[ ,.(]/)[0]; return !!c && c.length > 2 && ((profile && profile.employers) || []).some((e) => norm(e).includes(c)); };
 
   // Ordered rules: first match wins. Values come from the flat profile + per-job answers.
@@ -82,7 +89,7 @@
   ];
   const ask = (el) => { const t = (el.type || "").toLowerCase(); const q = (t === "radio" || t === "checkbox") ? questionOf(el) : ""; return q ? q + " | " + describe(el) : describe(el); };
   const valueFor = (el) => { const d = ask(el);
-    const extra = window.__applyraExtra; if (extra) { const k = d.split(" | ")[0]; if (extra[k] != null && extra[k] !== "") return extra[k]; } for (const [re, fn] of RULES) if (re.test(d)) return fn(profile || {}, el, task); return undefined; };
+    const extra = window.__applyraExtra; if (extra) { const v = extraFor(extra, d.split(" | ")[0]); if (v != null && v !== "") return v; } for (const [re, fn] of RULES) if (re.test(d)) return fn(profile || {}, el, task); return undefined; };
 
   /* ---------- Setting values in a way React/Vue/Angular forms notice ---------- */
   function setNative(el, v) {
