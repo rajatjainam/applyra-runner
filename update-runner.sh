@@ -10,4 +10,9 @@ gh auth setup-git
 git add -A && (git commit -qm "Update Applyra runner" || true)
 git push -q origin main
 REPO=$(git remote get-url origin | sed -E 's#.*github.com/##; s#\.git$##')
+if ! gh secret list --repo "$REPO" 2>/dev/null | grep -q '^GEMINI_API_KEY'; then
+  echo -e "\n\e[1m▸ AI form answers\e[0m — paste the same free Gemini key you put in Code.gs (input hidden), or press Enter to skip:"
+  read -rs GK; echo
+  [ -n "$GK" ] && printf '%s' "$GK" | gh secret set GEMINI_API_KEY --repo "$REPO" && echo "  ✔ Gemini key saved as a private GitHub secret"
+fi
 gh workflow run apply.yml --repo "$REPO" && echo -e "\n\e[32m✔ Runner updated and a run started.\e[0m Watch it: https://github.com/$REPO/actions"

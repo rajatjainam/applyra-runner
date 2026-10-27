@@ -36,3 +36,4 @@ jobs:
         env:
           FIREBASE_SA: ${{ secrets.FIREBASE_SA }}
           APP_URL: ${{ vars.APP_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

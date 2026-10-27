@@ -81,7 +81,8 @@
     [/additional information|anything else|comments/, (p, el, t) => t && t.answers && t.answers.additionalInfo],
   ];
   const ask = (el) => { const t = (el.type || "").toLowerCase(); const q = (t === "radio" || t === "checkbox") ? questionOf(el) : ""; return q ? q + " | " + describe(el) : describe(el); };
-  const valueFor = (el) => { const d = ask(el); for (const [re, fn] of RULES) if (re.test(d)) return fn(profile || {}, el, task); return undefined; };
+  const valueFor = (el) => { const d = ask(el);
+    const extra = window.__applyraExtra; if (extra) { const k = d.split(" | ")[0]; if (extra[k] != null && extra[k] !== "") return extra[k]; } for (const [re, fn] of RULES) if (re.test(d)) return fn(profile || {}, el, task); return undefined; };
 
   /* ---------- Setting values in a way React/Vue/Angular forms notice ---------- */
   function setNative(el, v) {
@@ -116,8 +117,14 @@
   }
   function fillAll() {
     if (!profile) return { filled: 0, missing: [] };
-    let filled = 0; const missing = [];
+    let filled = 0; const missing = [], missDet = [];
     const radios = new Map(); combos = [];
+    const addMiss = (q, el, group) => {
+      if (!q) return; missing.push(q);
+      const options = el.tagName === "SELECT" ? [...el.options].filter((o) => o.value !== "" && !/select|choose|--/i.test(o.text)).map((o) => o.text.trim())
+        : group ? group.map(optLabel) : [];
+      missDet.push({ q, type: options.length ? "choice" : el.tagName === "TEXTAREA" ? "long" : "short", options: options.slice(0, 30), maxLength: Number(el.getAttribute("maxlength")) || 0 });
+    };
     for (const el of fields()) {
       const t = (el.type || "").toLowerCase();
       if (t === "radio") { if (!radios.has(el.name)) radios.set(el.name, []); radios.get(el.name).push(el); continue; }
@@ -138,8 +145,8 @@
       if (filledEls.has(el) || (el.value && el.value.trim() && el.tagName !== "SELECT")) continue;
       if (el.tagName === "SELECT" && el.selectedIndex > 0) continue;
       const v = valueFor(el);
-      if (v == null || v === "") { if (isRequired(el)) missing.push(describe(el).split(" | ")[0]); continue; }
-      if (el.tagName === "SELECT") { if (pickOption(el, v)) { filledEls.add(el); filled++; } else if (isRequired(el)) missing.push(describe(el).split(" | ")[0]); continue; }
+      if (v == null || v === "") { if (isRequired(el)) addMiss(describe(el).split(" | ")[0], el); continue; }
+      if (el.tagName === "SELECT") { if (pickOption(el, v)) { filledEls.add(el); filled++; } else if (isRequired(el)) addMiss(describe(el).split(" | ")[0], el); continue; }
       const maxLen = Number(el.getAttribute("maxlength")) || 0;
       setNative(el, maxLen ? String(v).slice(0, maxLen) : String(v)); filledEls.add(el); filled++;
     }
@@ -147,24 +154,27 @@
       if (group.some((r) => r.checked)) continue;
       const q = ask(group[0]);
       const ans = norm(valueFor(group[0]) || (/disab|veteran|ethnic|race/.test(q) ? "prefer not" : ""));
-      if (!ans) { if (group.some(isRequired)) missing.push(q.split(" | ")[0]); continue; }
+      if (!ans) { if (group.some(isRequired)) addMiss(q.split(" | ")[0], group[0], group); continue; }
       const lab = (r) => norm((r.id && document.querySelector(`label[for="${CSS.escape(r.id)}"]`) || r.closest("label") || {}).innerText || r.value);
       const hit = group.find((r) => lab(r) === ans) || group.find((r) => lab(r).startsWith(ans.split(/[ ,]/)[0])) ||
         (/prefer not|decline/.test(ans) && group.find((r) => /prefer not|decline|not to/.test(lab(r))));
-      if (hit) { hit.click(); filled++; }
+      if (hit) { hit.click(); filled++; } else if (group.some(isRequired)) addMiss(q.split(" | ")[0], group[0], group);
     }
-    return { filled, missing: [...new Set(missing.filter(Boolean))].slice(0, 8) };
+    const seenQ = new Set();
+    return { filled, missing: [...new Set(missing.filter(Boolean))].slice(0, 12), missDet: missDet.filter((m) => !seenQ.has(m.q) && seenQ.add(m.q)).slice(0, 12) };
   }
+  const optLabel = (r) => String((r.id && document.querySelector(`label[for="${CSS.escape(r.id)}"]`) || r.closest("label") || {}).innerText || r.value || "").trim();
   const isRequired = (el) => el.required || el.getAttribute("aria-required") === "true" || /\*\s*$/.test((describe(el).split(" | ")[0] || ""));
 
   async function fillCombos() {
-    let filled = 0; const missing = [];
+    let filled = 0; const missing = [], missDet = [];
+    const miss = (el) => { const q = describe(el).split(" | ")[0]; missing.push(q); missDet.push({ q, type: "short", options: [], maxLength: 0 }); };
     for (const el of combos.slice()) {
       if (filledEls.has(el) || !el.isConnected) continue;
       const box = el.closest("[class*='select'], [class*='Select'], .field, div");
       if (box && box.querySelector("[class*='single-value'], [class*='singleValue']")) { filledEls.add(el); continue; }
       const v = valueFor(el), req = isRequired(el) || /\*\s*$/.test(describe(el).split(" | ")[0] || "");
-      if (v == null || v === "") { if (req) missing.push(describe(el).split(" | ")[0]); continue; }
+      if (v == null || v === "") { if (req) miss(el); continue; }
       const want = norm(v).slice(0, 40);
       el.focus(); el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })); setNative(el, want.split(/[,(]/)[0].trim().slice(0, 25));
       await sleep(700);
@@ -172,10 +182,10 @@
       const o = opts.find((x) => norm(x.innerText) === want) || opts.find((x) => norm(x.innerText).startsWith(want) || want.startsWith(norm(x.innerText))) ||
         (/^yes/.test(want) && opts.find((x) => /^yes/i.test(x.innerText))) || (/^no\b/.test(want) && opts.find((x) => /^no\b/i.test(x.innerText))) ||
         (/prefer not|decline/.test(want) && opts.find((x) => /prefer not|decline|not to/i.test(x.innerText))) || (opts.length === 1 ? opts[0] : null);
-      if (o) { o.click(); filledEls.add(el); filled++; } else { el.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); if (req) missing.push(describe(el).split(" | ")[0]); }
+      if (o) { o.click(); filledEls.add(el); filled++; } else { el.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); if (req) miss(el); }
       await sleep(250);
     }
-    return { filled, missing };
+    return { filled, missing, missDet };
   }
 
   /* ---------- Navigation helpers ---------- */
@@ -197,9 +207,9 @@
   }
   const captcha = () => [...document.querySelectorAll("iframe[src*='recaptcha'], iframe[src*='hcaptcha'], iframe[src*='turnstile']")].some((f) => visible(f) && f.getBoundingClientRect().height > 60);
 
-  async function report(status, detail = "") {
+  async function report(status, detail = "", extra = {}) {
     const key = `${status}:${detail}`; if (key === lastReport) return; lastReport = key;
-    await send("result", { status, detail }); updatePanel(status, detail);
+    await send("result", { status, detail, ...extra }); updatePanel(status, detail);
   }
 
   /* ---------- Floating status panel ---------- */
@@ -239,7 +249,7 @@
       makePanel();
       let result = fillAll();
       if (!result.filled && !manual && clickApplyEntry()) { await sleep(2500); result = fillAll(); }
-      if (combos.length) { const c = await fillCombos(); result.filled += c.filled; result.missing = [...new Set(result.missing.concat(c.missing))].slice(0, 8); }
+      if (combos.length) { const c = await fillCombos(); result.filled += c.filled; result.missing = [...new Set(result.missing.concat(c.missing))].slice(0, 12); result.missDet = result.missDet.concat(c.missDet).slice(0, 12); }
       if (!result.filled && !fields().some((f) => /e-?mail|name/.test(describe(f)))) { updatePanel(null, task && task.ats === "naukri" ? "Press Naukri's Apply button — Applyra answers any questions it recognises." : "Waiting for the application form…"); return; }
       const canAuto = task && task.autoSubmit && AUTOSUBMIT.includes(task.ats) && !result.missing.length && !captcha();
       if (canAuto) {
@@ -248,9 +258,10 @@
         if (b) { updatePanel(null, "Submitting…"); b.click(); watchSuccess(); return; }
       }
       const why = result.missing.length ? `Still needed: ${result.missing.map((m) => `"${m}"`).join(", ")}` : captcha() ? "The site asks for a captcha." : "";
-      report("filled", why);
+      report("filled", why, { missing: result.missDet || [] });
     } finally { running = false; }
   }
+  window.__applyraRun = () => { lastReport = ""; return run(false); };
   function watchSuccess() {
     const t0 = Date.now();
     const iv = setInterval(() => {
