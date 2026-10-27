@@ -5,6 +5,7 @@
 
   const AUTOSUBMIT = ["greenhouse", "lever", "ashby", "workable", "smartrecruiters", "recruitee", "teamtailor", "bamboohr"];
   const SUCCESS = /thank(s| you) for (applying|your application|your interest)|application (has been |was )?(submitted|received|sent)|we('ve| have) received your application|successfully applied|your application is on its way|application complete/i;
+  let combos = [];
   let task = null, profile = null, filledEls = new WeakSet(), submitted = false, clickedApply = false, panel = null, lastReport = "";
 
   const send = (type, payload) => new Promise((res) => { try { chrome.runtime.sendMessage({ kind: "filler", type, payload }, (r) => { void chrome.runtime.lastError; res(r); }); } catch (e) { res(null); } });
@@ -27,6 +28,23 @@
     return norm(bits.filter(Boolean).join(" | ")).slice(0, 400);
   }
 
+  /* The question a radio/checkbox group or dropdown belongs to (not the option label like "Yes"). */
+  function questionOf(el) {
+    const fs = el.closest("fieldset"); if (fs) { const lg = fs.querySelector("legend"); if (lg && norm(lg.innerText)) return norm(lg.innerText); }
+    const rg = el.closest("[role=radiogroup], [role=group]");
+    if (rg) { const lb = rg.getAttribute("aria-labelledby"); const t = (lb && lb.split(/\s+/).map((id) => (document.getElementById(id) || {}).innerText || "").join(" ")) || rg.getAttribute("aria-label"); if (norm(t)) return norm(t); }
+    const group = el.name ? [...document.querySelectorAll(`input[name="${CSS.escape(el.name)}"]`)] : [el];
+    const optText = new Set(group.map((r) => norm((r.id && document.querySelector(`label[for="${CSS.escape(r.id)}"]`) || r.closest("label") || {}).innerText || r.value)));
+    let a = el.parentElement;
+    for (let i = 0; a && i < 7; i++, a = a.parentElement) {
+      if (!group.every((r) => a.contains(r))) continue;
+      const lines = String(a.innerText || "").split(/\n+/).map(norm).filter((l) => l && !optText.has(l) && l.length > 3);
+      if (lines.length) return lines[0].slice(0, 200);
+    }
+    return "";
+  }
+  const pastEmployer = (company) => { const c = norm(company).split(/[ ,.(]/)[0]; return !!c && c.length > 2 && ((profile && profile.employers) || []).some((e) => norm(e).includes(c)); };
+
   // Ordered rules: first match wins. Values come from the flat profile + per-job answers.
   const RULES = [
     [/first.?name|given.?name|fname/, (p) => p.firstName], [/last.?name|surname|family.?name|lname/, (p) => p.lastName],
@@ -43,7 +61,7 @@
     [/expected.?(ctc|salary|compensation|package)|salary expectation|desired (salary|pay)|compensation expectation/, (p) => p.expectedCtc],
     [/years? of (relevant |total )?experience|total experience|experience \(years\)|how many years/, (p) => p.yearsExperience],
     [/relocat/, (p) => p.relocate],
-    [/sponsor/, (p) => p.needSponsorship],
+    [/sponsor/, (p, el, t) => { const a = String(p.needSponsorship || ""); const abroad = t && t.location && !/india|remote|anywhere|worldwide|gurugram|gurgaon|delhi|noida|bengaluru|bangalore|mumbai|pune|hyderabad|chennai|kolkata|ahmedabad/i.test(t.location); return /outside india/i.test(a) ? (abroad ? "Yes" : "No") : a; }],
     [/authori[sz]ed to work|work authori[sz]ation|legally (able|eligible|authorized)|right to work|eligible to work/, (p, el) => (/india/.test(describe(el)) ? p.workAuthIndia : /india/i.test(String(p.country)) && !/india/.test(describe(el)) ? "No" : p.workAuthIndia)],
     [/nationality|citizenship/, (p) => p.nationality],
     [/pronoun/, (p) => p.pronouns], [/gender|sex\b/, (p) => p.gender],
@@ -52,6 +70,9 @@
     [/country/, (p) => p.country || "India"], [/address/, (p) => p.location],
     [/university|college|school|institution/, (p) => p.school], [/degree|qualification|education/, (p) => p.degree], [/graduat(ion|ed).?(year|date)/, (p) => p.gradYear],
     [/headline/, (p) => p.headline], [/skills/, (p) => p.skills],
+    [/(18|eighteen) years|legal (working )?age|at least 18/, () => "Yes"],
+    [/(previously|ever|currently) (been )?(employed|worked) (by|at|for|with)|former employee|worked (here|for us) before/, (p, el, t) => (t && pastEmployer(t.company) ? "Yes" : "No")],
+    [/(consent|agree|acknowledge|certify|confirm).*(privacy|terms|policy|accurate|true|processing|data)|privacy (policy|notice)/, () => "Yes"],
     [/cover.?letter/, (p, el, t) => t && t.coverLetter],
     [/why (do you want to|are you interested|this company|us|join|work (at|for|with))|interest(ed)? in (this company|working)|what excites/, (p, el, t) => t && t.answers && t.answers.whyCompany],
     [/why (this|the) (role|position)|why are you (a good fit|applying)|fit for (this|the) role/, (p, el, t) => t && t.answers && t.answers.whyRole],
@@ -59,7 +80,8 @@
     [/relevant experience|describe your experience|tell us about (yourself|your experience)|summary|about you/, (p, el, t) => (t && t.answers && t.answers.relevantExperience) || p.summary],
     [/additional information|anything else|comments/, (p, el, t) => t && t.answers && t.answers.additionalInfo],
   ];
-  const valueFor = (el) => { const d = describe(el); for (const [re, fn] of RULES) if (re.test(d)) return fn(profile || {}, el, task); return undefined; };
+  const ask = (el) => { const t = (el.type || "").toLowerCase(); const q = (t === "radio" || t === "checkbox") ? questionOf(el) : ""; return q ? q + " | " + describe(el) : describe(el); };
+  const valueFor = (el) => { const d = ask(el); for (const [re, fn] of RULES) if (re.test(d)) return fn(profile || {}, el, task); return undefined; };
 
   /* ---------- Setting values in a way React/Vue/Angular forms notice ---------- */
   function setNative(el, v) {
@@ -95,7 +117,7 @@
   function fillAll() {
     if (!profile) return { filled: 0, missing: [] };
     let filled = 0; const missing = [];
-    const radios = new Map();
+    const radios = new Map(); combos = [];
     for (const el of fields()) {
       const t = (el.type || "").toLowerCase();
       if (t === "radio") { if (!radios.has(el.name)) radios.set(el.name, []); radios.get(el.name).push(el); continue; }
@@ -112,6 +134,7 @@
         if (!el.checked && /i agree|consent|acknowledge|privacy (policy|notice)|terms|accurate|certify/.test(d) && !/marketing|newsletter|future (jobs|opportunities)|sms/.test(d)) { el.click(); filled++; }
         continue;
       }
+      if (el.getAttribute("role") === "combobox" && el.tagName === "INPUT") { if (!filledEls.has(el)) combos.push(el); continue; }
       if (filledEls.has(el) || (el.value && el.value.trim() && el.tagName !== "SELECT")) continue;
       if (el.tagName === "SELECT" && el.selectedIndex > 0) continue;
       const v = valueFor(el);
@@ -122,7 +145,7 @@
     }
     for (const [, group] of radios) {
       if (group.some((r) => r.checked)) continue;
-      const q = describe(group[0]);
+      const q = ask(group[0]);
       const ans = norm(valueFor(group[0]) || (/disab|veteran|ethnic|race/.test(q) ? "prefer not" : ""));
       if (!ans) { if (group.some(isRequired)) missing.push(q.split(" | ")[0]); continue; }
       const lab = (r) => norm((r.id && document.querySelector(`label[for="${CSS.escape(r.id)}"]`) || r.closest("label") || {}).innerText || r.value);
@@ -133,6 +156,27 @@
     return { filled, missing: [...new Set(missing.filter(Boolean))].slice(0, 8) };
   }
   const isRequired = (el) => el.required || el.getAttribute("aria-required") === "true" || /\*\s*$/.test((describe(el).split(" | ")[0] || ""));
+
+  async function fillCombos() {
+    let filled = 0; const missing = [];
+    for (const el of combos.slice()) {
+      if (filledEls.has(el) || !el.isConnected) continue;
+      const box = el.closest("[class*='select'], [class*='Select'], .field, div");
+      if (box && box.querySelector("[class*='single-value'], [class*='singleValue']")) { filledEls.add(el); continue; }
+      const v = valueFor(el), req = isRequired(el) || /\*\s*$/.test(describe(el).split(" | ")[0] || "");
+      if (v == null || v === "") { if (req) missing.push(describe(el).split(" | ")[0]); continue; }
+      const want = norm(v).slice(0, 40);
+      el.focus(); el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })); setNative(el, want.split(/[,(]/)[0].trim().slice(0, 25));
+      await sleep(700);
+      const opts = [...document.querySelectorAll("[role=option]")].filter(visible);
+      const o = opts.find((x) => norm(x.innerText) === want) || opts.find((x) => norm(x.innerText).startsWith(want) || want.startsWith(norm(x.innerText))) ||
+        (/^yes/.test(want) && opts.find((x) => /^yes/i.test(x.innerText))) || (/^no\b/.test(want) && opts.find((x) => /^no\b/i.test(x.innerText))) ||
+        (/prefer not|decline/.test(want) && opts.find((x) => /prefer not|decline|not to/i.test(x.innerText))) || (opts.length === 1 ? opts[0] : null);
+      if (o) { o.click(); filledEls.add(el); filled++; } else { el.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); if (req) missing.push(describe(el).split(" | ")[0]); }
+      await sleep(250);
+    }
+    return { filled, missing };
+  }
 
   /* ---------- Navigation helpers ---------- */
   const buttons = () => [...document.querySelectorAll("button, a, input[type=submit], [role=button]")].filter(visible);
@@ -195,6 +239,7 @@
       makePanel();
       let result = fillAll();
       if (!result.filled && !manual && clickApplyEntry()) { await sleep(2500); result = fillAll(); }
+      if (combos.length) { const c = await fillCombos(); result.filled += c.filled; result.missing = [...new Set(result.missing.concat(c.missing))].slice(0, 8); }
       if (!result.filled && !fields().some((f) => /e-?mail|name/.test(describe(f)))) { updatePanel(null, task && task.ats === "naukri" ? "Press Naukri's Apply button — Applyra answers any questions it recognises." : "Waiting for the application form…"); return; }
       const canAuto = task && task.autoSubmit && AUTOSUBMIT.includes(task.ats) && !result.missing.length && !captcha();
       if (canAuto) {
@@ -202,7 +247,7 @@
         const b = submitButton();
         if (b) { updatePanel(null, "Submitting…"); b.click(); watchSuccess(); return; }
       }
-      const why = result.missing.length ? `Still needed: ${result.missing.join(", ")}.` : captcha() ? "The site asks for a captcha." : "";
+      const why = result.missing.length ? `Still needed: ${result.missing.map((m) => `"${m}"`).join(", ")}` : captcha() ? "The site asks for a captcha." : "";
       report("filled", why);
     } finally { running = false; }
   }

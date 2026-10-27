@@ -42,7 +42,7 @@ function flatProfile(R, scr) {
     location: R.location, city: String(R.location || "").split(",")[0].trim(), country: /india/i.test(R.location || "") || !R.location ? "India" : "",
     linkedin: R.linkedin, website: R.website || R.linkedin, github: R.github, currentTitle: cur.title, currentCompany: cur.company,
     yearsExperience: String(R.yearsExperience || ""), headline: R.headline, summary: R.summary, school: edu.school, degree: edu.degree, gradYear: edu.year,
-    skills: (R.skills || []).join(", "), ...sc };
+    skills: (R.skills || []).join(", "), employers: (R.experience || []).map((e) => e.company).filter(Boolean), ...sc };
 }
 const status = async (ref, s, extra = {}) => ref.set({ status: s, updatedAt: Date.now(), stages: FV.arrayUnion({ s, at: Date.now() }), ...extra }, { merge: true });
 
@@ -59,7 +59,7 @@ for (const d of queued.docs) {
     const files = await pdfPage.evaluate(async (x) => window.makeFiles(x.profile, x.override, x.tid, x.letter, x.job),
       { profile, override: a.pack.resume, tid: a.templateId || (user.settings || {}).applyTemplateId || "meridian", letter: a.pack.coverLetter, job: { title: job.title, company: job.company } });
     const base = slug(profile.name || "Resume");
-    const task = { taskId: d.id, url: job.url, ats: job.ats, company: job.company, title: job.title, autoSubmit: true, background: true,
+    const task = { taskId: d.id, url: job.url, ats: job.ats, company: job.company, title: job.title, location: job.location || "", autoSubmit: true, background: true,
       profile: flatProfile(files.R, user.screening), coverLetter: a.pack.coverLetter, answers: { ...(a.pack.screening || {}), recruiterNote: a.pack.recruiterNote },
       files: [{ role: "resume", name: `${base}_Resume.pdf`, type: "application/pdf", data: files.resume }, { role: "cover", name: `${base}_Cover_Letter_${slug(job.company)}.pdf`, type: "application/pdf", data: files.letter }] };
     const stub = `({ runtime: { lastError: null, getURL: () => "", getManifest: () => ({ version: "cloud" }), onMessage: { addListener() {} },
@@ -76,10 +76,12 @@ for (const d of queued.docs) {
       const filled = all.filter((r) => r.status === "filled" || r.status === "failed").pop();
       if (filled) { if (!filledAt) filledAt = Date.now(); else if (Date.now() - filledAt > 30000) result = filled; }
     }
+    console.log(`• ${job.title} @ ${job.company} [${job.ats}] → ${result && result.status === "submitted" ? "APPLIED" : "needs review: " + ((result && result.detail) || "no confirmation page")}`);
     if (result && result.status === "submitted") { await status(ref, "applied", { appliedAt: Date.now(), method: "cloud-auto", extDetail: "Submitted automatically from the cloud." }); done++; }
     else { await status(ref, "needs_review", { extDetail: `Cloud apply stopped: ${(result && result.detail) || "the form didn't confirm submission"}. Open it to finish.` }); review++; }
     await ctx.close();
   } catch (e) {
+    console.log(`• ${job.title} @ ${job.company} → error: ${String(e.message || e).slice(0, 160)}`);
     await status(ref, "needs_review", { extDetail: `Cloud apply error: ${String(e.message || e).slice(0, 200)}` }); review++;
   }
 }
