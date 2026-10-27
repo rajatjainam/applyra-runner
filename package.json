@@ -1,0 +1,10 @@
+{
+  "name": "applyra-runner",
+  "private": true,
+  "description": "Applyra cloud auto-apply: opens queued applications in a real browser, fills and submits them.",
+  "type": "module",
+  "dependencies": {
+    "firebase-admin": "^12.7.0",
+    "playwright": "1.48.2"
+  }
+}

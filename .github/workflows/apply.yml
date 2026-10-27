@@ -1,0 +1,38 @@
+name: Applyra cloud apply
+on:
+  schedule:
+    - cron: "*/20 * * * *"   # every 20 minutes (GitHub may delay scheduled runs a little)
+  workflow_dispatch: {}
+concurrency:
+  group: applyra-apply
+  cancel-in-progress: false
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install --no-audit --no-fund
+      - name: Anything queued?
+        id: q
+        run: node run.mjs --check
+        env:
+          FIREBASE_SA: ${{ secrets.FIREBASE_SA }}
+      - name: Cache browser
+        if: steps.q.outputs.work == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: pw-1.48.2
+      - name: Install browser
+        if: steps.q.outputs.work == 'true'
+        run: npx playwright install --with-deps chromium
+      - name: Apply
+        if: steps.q.outputs.work == 'true'
+        run: node run.mjs
+        env:
+          FIREBASE_SA: ${{ secrets.FIREBASE_SA }}
+          APP_URL: ${{ vars.APP_URL }}
