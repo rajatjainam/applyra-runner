@@ -286,6 +286,7 @@
     const r = await send("getTask");
     if (!r || !r.task) return; // Only act on pages Applyra opened.
     task = r.task; profile = { ...(r.profile || {}), ...(task.profile || {}) };
+    if (task.extra) window.__applyraExtra = Object.assign({}, task.extra, window.__applyraExtra || {});
     await sleep(1200); run();
     const mo = new MutationObserver(debounce(() => { if (!submitted) { run(); if (SUCCESS.test((document.body || {}).innerText || "")) { submitted = true; report("submitted"); } } }, 900));
     mo.observe(document.documentElement, { childList: true, subtree: true });

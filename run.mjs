@@ -113,7 +113,8 @@ for (const d of queued.docs) {
     const files = await pdfPage.evaluate(async (x) => window.makeFiles(x.profile, x.override, x.tid, x.letter, x.job),
       { profile, override: a.pack.resume, tid: a.templateId || (user.settings || {}).applyTemplateId || "meridian", letter: a.pack.coverLetter, job: { title: job.title, company: job.company } });
     const base = slug(profile.name || "Resume");
-    const task = { taskId: d.id, url: job.url, ats: job.ats, company: job.company, title: job.title, location: job.location || "", autoSubmit: true, background: true,
+    const extra = {}; (a.formAnswers || []).forEach((x) => { if (x && x.q && x.a) extra[x.q] = x.a; });
+    const task = { extra, taskId: d.id, url: job.url, ats: job.ats, company: job.company, title: job.title, location: job.location || "", autoSubmit: true, background: true,
       profile: flatProfile(files.R, user.screening), coverLetter: a.pack.coverLetter, answers: { ...(a.pack.screening || {}), recruiterNote: a.pack.recruiterNote },
       files: [{ role: "resume", name: `${base}_Resume.pdf`, type: "application/pdf", data: files.resume }, { role: "cover", name: `${base}_Cover_Letter_${slug(job.company)}.pdf`, type: "application/pdf", data: files.letter }] };
     const stub = `({ runtime: { lastError: null, getURL: () => "", getManifest: () => ({ version: "cloud" }), onMessage: { addListener() {} },
@@ -133,7 +134,7 @@ for (const d of queued.docs) {
     }
     /* AI step: answer the remaining questions, re-fill and submit */
     let aiNote = "", aiLog = null;
-    const aiOn = a.aiRetry || ((user.settings || {}).autoApply || {}).aiFill;
+    const aiOn = a.aiRetry || ((user.settings || {}).autoApply || {}).aiFill !== false;
     if (aiOn && result && result.status === "filled" && (result.missing || []).length) {
       if (!GEMINI) aiNote = " (AI fill isn't switched on for the runner yet — run update-runner.sh and paste your Gemini key)";
       else {
@@ -162,11 +163,13 @@ for (const d of queued.docs) {
     }
     let diag = null;
     if (!result) diag = await diagnose(page);
+    let shot = "";
+    if (!result || result.status !== "submitted") { try { shot = "data:image/jpeg;base64," + (await page.screenshot({ type: "jpeg", quality: 40 })).toString("base64"); } catch (e) {} }
     const why = ((result && result.detail) || (diag && diag.detail) || "the site didn't confirm the submission") + aiNote;
     console.log(`• ${job.title} @ ${job.company} [${job.ats}] ${target} → ${result && result.status === "submitted" ? "APPLIED" : "needs review: " + why}`);
     if (result && result.status === "submitted") { await status(ref, "applied", { appliedAt: Date.now(), method: aiLog && aiLog.length ? "cloud-auto+ai" : "cloud-auto", extDetail: aiLog && aiLog.length ? `Submitted from the cloud. AI answered ${aiLog.length} question(s) — see below.` : "Submitted automatically from the cloud.", aiAnswers: aiLog || [], aiRetry: false }); done++; }
     else if (diag && diag.closed) { await status(ref, "skipped", { extDetail: `Cloud apply: ${why}.` }); review++; }
-    else { await status(ref, "needs_review", { extDetail: `Cloud apply stopped: ${why}. Open it to finish.`, formUrl: target, aiAnswers: aiLog || [], aiRetry: false, openQuestions: ((result && result.missing) || []).map((m) => m.q) }); review++; }
+    else { await status(ref, "needs_review", { extDetail: `Cloud apply stopped: ${why}. Open it to finish.`, formUrl: target, robotShot: shot.length < 700000 ? shot : "", robotShotAt: Date.now(), aiAnswers: aiLog || [], aiRetry: false, openQuestions: ((result && result.missing) || []).map((m) => m.q) }); review++; }
     await ctx.close();
   } catch (e) {
     console.log(`• ${job.title} @ ${job.company} → error: ${String(e.message || e).slice(0, 160)}`);
