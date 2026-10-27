@@ -169,6 +169,7 @@ for (const d of queued.docs) {
     console.log(`• ${job.title} @ ${job.company} [${job.ats}] ${target} → ${result && result.status === "submitted" ? "APPLIED" : "needs review: " + why}`);
     if (result && result.status === "submitted") { await status(ref, "applied", { appliedAt: Date.now(), method: aiLog && aiLog.length ? "cloud-auto+ai" : "cloud-auto", extDetail: aiLog && aiLog.length ? `Submitted from the cloud. AI answered ${aiLog.length} question(s) — see below.` : "Submitted automatically from the cloud.", aiAnswers: aiLog || [], aiRetry: false }); done++; }
     else if (diag && diag.closed) { await status(ref, "skipped", { extDetail: `Cloud apply: ${why}.` }); review++; }
+    else if (result && result.captcha) { await status(ref, "needs_review", { extDetail: "Everything is filled in, but the site asks a human to tick a captcha. Tap “Open & pre-fill form” (laptop) or “AI answers for this form → Open form & autofill” (phone), tick the captcha, and Applyra submits.", formUrl: target, robotShot: shot.length < 700000 ? shot : "", robotShotAt: Date.now(), aiAnswers: aiLog || [], aiRetry: false, openQuestions: [] }); review++; }
     else { await status(ref, "needs_review", { extDetail: `Cloud apply stopped: ${why}. Open it to finish.`, formUrl: target, robotShot: shot.length < 700000 ? shot : "", robotShotAt: Date.now(), aiAnswers: aiLog || [], aiRetry: false, openQuestions: ((result && result.missing) || []).map((m) => m.q) }); review++; }
     await ctx.close();
   } catch (e) {

@@ -212,6 +212,35 @@
     return buttons().find((x) => /^(submit( application| my application)?|send application|apply|complete application|submit & apply)$/.test(txt(x)) && !x.disabled)
       || [...document.querySelectorAll("button[type=submit], input[type=submit]")].find(visible);
   }
+  /* ---------- Cookie / consent banners: pick "necessary only" (or accept) so they stop blocking the form ---------- */
+  const CONSENT_IDS = ["#onetrust-reject-all-handler", "#onetrust-accept-btn-handler", "#CybotCookiebotDialogBodyButtonDecline", "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
+    "#CybotCookiebotDialogBodyButtonAccept", "#truste-consent-required", "#truste-consent-button", "#didomi-notice-disagree-button", "#didomi-notice-agree-button",
+    "#accept-recommended-btn-handler", ".cc-deny", ".cc-dismiss", ".cc-allow", "#cookie-accept", "#accept-cookies", "[data-cookiebanner='accept_button']", "[data-testid='cookie-policy-manage-dialog-accept-button']"];
+  const CONSENT_PREF = /^(reject all|reject( all)? cookies|decline( all)?|only (necessary|essential|required)( cookies)?|(use )?(strictly )?necessary( cookies)?( only)?|essential( cookies)? only|continue without accepting)$/i;
+  const CONSENT_OK = /^(accept all( cookies)?|accept( cookies)?|allow all( cookies)?|allow( cookies)?|i agree|agree( and close)?|got it|ok(ay)?|understood|i understand|accept & close|accept and continue)$/i;
+  function dismissConsent() {
+    for (const sel of CONSENT_IDS) { const b = document.querySelector(sel); if (b && visible(b)) { b.click(); return true; } }
+    const uc = document.querySelector("#usercentrics-root");
+    if (uc && uc.shadowRoot) { const b = uc.shadowRoot.querySelector("[data-testid='uc-deny-all-button'], [data-testid='uc-accept-all-button']"); if (b) { b.click(); return true; } }
+    const boxes = [...document.querySelectorAll("[id*='cookie' i], [class*='cookie' i], [id*='consent' i], [class*='consent' i], [aria-label*='cookie' i], [role=dialog], [role=alertdialog]")]
+      .filter((b) => visible(b) && /cookie/i.test(b.innerText || "") && b.querySelectorAll("input:not([type=checkbox]):not([type=hidden]), textarea, select").length < 2).slice(0, 6);
+    for (const box of boxes) {
+      const btns = [...box.querySelectorAll("button, a, [role=button], input[type=button], input[type=submit]")].filter(visible);
+      const pick = btns.find((b) => CONSENT_PREF.test(txt(b))) || btns.find((b) => CONSENT_OK.test(txt(b)));
+      if (pick) { pick.click(); return true; }
+    }
+    return false;
+  }
+  /* ---------- Captcha: the person ticks it; Applyra then presses Submit ---------- */
+  const captchaSolved = () => [...document.querySelectorAll("textarea[name='g-recaptcha-response'], textarea[name='h-captcha-response'], input[name='cf-turnstile-response']")].some((t) => (t.value || "").length > 20);
+  let captchaWatch = null;
+  function watchCaptcha() {
+    if (captchaWatch) return; const t0 = Date.now();
+    captchaWatch = setInterval(() => {
+      if (submitted || Date.now() - t0 > 15 * 60000) { clearInterval(captchaWatch); captchaWatch = null; return; }
+      if (captchaSolved()) { clearInterval(captchaWatch); captchaWatch = null; const b = submitButton(); if (b) { updatePanel(null, "Thanks — submitting…"); b.click(); watchSuccess(); } }
+    }, 1000);
+  }
   const captcha = () => [...document.querySelectorAll("iframe[src*='recaptcha'], iframe[src*='hcaptcha'], iframe[src*='turnstile']")].some((f) => visible(f) && f.getBoundingClientRect().height > 60);
 
   async function report(status, detail = "", extra = {}) {
@@ -254,15 +283,18 @@
     if (running || submitted) return; running = true;
     try {
       makePanel();
+      if (dismissConsent()) await sleep(900);
       let result = fillAll();
       if (!result.filled && !manual && clickApplyEntry()) { await sleep(2500); result = fillAll(); }
       if (combos.length) { const c = await fillCombos(); result.filled += c.filled; result.missing = [...new Set(result.missing.concat(c.missing))].slice(0, 12); result.missDet = result.missDet.concat(c.missDet).slice(0, 12); }
       if (!result.filled && !fields().some((f) => /e-?mail|name/.test(describe(f)))) { updatePanel(null, task && task.ats === "naukri" ? "Press Naukri's Apply button — Applyra answers any questions it recognises." : "Waiting for the application form…"); return; }
-      const canAuto = task && task.autoSubmit && AUTOSUBMIT.includes(task.ats) && !result.missing.length && !captcha();
+      const ready = task && task.autoSubmit && AUTOSUBMIT.includes(task.ats) && !result.missing.length;
+      if (task && AUTOSUBMIT.includes(task.ats) && !result.missing.length && captcha()) { report("filled", "The site shows a captcha — tick it and Applyra presses Submit for you.", { captcha: true, missing: [] }); watchCaptcha(); return; }
+      const canAuto = ready;
       if (canAuto) {
         await sleep(1200 + Math.random() * 1200);
         const b = submitButton();
-        if (b) { updatePanel(null, "Submitting…"); b.click(); watchSuccess(); return; }
+        if (b) { dismissConsent(); updatePanel(null, "Submitting…"); b.click(); watchSuccess(); return; }
       }
       const why = result.missing.length ? `Still needed: ${result.missing.map((m) => `"${m}"`).join(", ")}` : captcha() ? "The site asks for a captcha." : "";
       report("filled", why, { missing: result.missDet || [] });
@@ -276,6 +308,7 @@
       if (SUCCESS.test(body) || /thank|confirm|success|submitted/i.test(location.pathname + location.search)) { clearInterval(iv); submitted = true; report("submitted"); }
       else if (Date.now() - t0 > 25000) {
         clearInterval(iv);
+        if (captcha()) { report("filled", "The site asked for a captcha after Submit — tick it and Applyra submits for you.", { captcha: true, missing: [] }); watchCaptcha(); return; }
         const errs = [...document.querySelectorAll("[aria-invalid=true], .error, .field-error, [class*='error']")].filter(visible).map((e) => e.innerText).filter(Boolean).slice(0, 3);
         report("filled", errs.length ? `The form flagged: ${errs.join("; ").slice(0, 160)}` : "Couldn't confirm the submission — please check the tab.");
       }
