@@ -15,21 +15,20 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm install --no-audit --no-fund
+      - name: Cache packages
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: nm-${{ hashFiles('package.json') }}
+      - run: "[ -d node_modules/playwright ] || npm install --no-audit --no-fund"
       - name: Anything queued?
         id: q
         run: node run.mjs --check
         env:
           FIREBASE_SA: ${{ secrets.FIREBASE_SA }}
-      - name: Cache browser
+      - name: Browser (uses the runner's Google Chrome; installs Chromium only if Chrome is missing)
         if: steps.q.outputs.work == 'true'
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: pw-1.48.2
-      - name: Install browser
-        if: steps.q.outputs.work == 'true'
-        run: npx playwright install --with-deps chromium
+        run: command -v google-chrome >/dev/null || npx playwright install --with-deps chromium
       - name: Apply
         if: steps.q.outputs.work == 'true'
         run: node run.mjs

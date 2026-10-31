@@ -38,7 +38,13 @@ const { chromium } = await import("playwright");
 const APP_URL = (process.env.APP_URL || `https://${sa.project_id}.web.app`).replace(/\/$/, "");
 const FILLER = fs.readFileSync(new URL("./filler.js", import.meta.url), "utf8");
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
-const browser = await chromium.launch({ args: ["--disable-blink-features=AutomationControlled"] });
+const LAUNCH = { args: ["--disable-blink-features=AutomationControlled"] };
+let browser;
+try { browser = await chromium.launch({ ...LAUNCH, channel: "chrome" }); }
+catch (e) {
+  try { browser = await chromium.launch(LAUNCH); }
+  catch (e2) { const { execSync } = await import("child_process"); execSync("npx playwright install --with-deps chromium", { stdio: "inherit" }); browser = await chromium.launch(LAUNCH); }
+}
 const pdfPage = await browser.newPage();
 await pdfPage.goto(`${APP_URL}/runner.html`, { waitUntil: "load", timeout: 60000 });
 await pdfPage.waitForFunction(() => window.runnerReady === true, null, { timeout: 60000 });
@@ -128,6 +134,24 @@ async function pickOption(frame, want) {
   }
   return false;
 }
+/* Pick from a type-ahead dropdown: waits for async options (city search etc.), ignores "Loading…", verifies the choice stuck. */
+async function pickCombo(frame, loc, v) {
+  const shown = () => loc.evaluate((el) => (window.__applyraComboValue ? window.__applyraComboValue(el) : "")).catch(() => "");
+  const cur = await shown();
+  if (cur && bestIdx(cur.split(", "), v) >= 0) return true; // already answered — don't touch it
+  await loc.click({ timeout: 4000 }).catch(() => {});
+  await loc.pressSequentially(v.replace(/[,(].*$/, "").trim().slice(0, 25), { delay: 35 });
+  const t0 = Date.now();
+  while (Date.now() - t0 < 6000) {
+    await frame.waitForTimeout(350);
+    const loading = await frame.locator("[class*='loading' i]:visible, [class*='menu-notice' i]:visible").allInnerTexts().catch(() => []);
+    if (loading.some((x) => /loading|searching/i.test(x))) continue;
+    if (await pickOption(frame, v)) break;
+    if (Date.now() - t0 > 2500) { await loc.press("ArrowDown").catch(() => {}); await loc.press("Enter").catch(() => {}); break; }
+  }
+  await frame.waitForTimeout(300);
+  return !!(await shown());
+}
 async function clickAid(frame, id) {
   const loc = frame.locator(`[data-aid="${id}"]`).first();
   try { await loc.click({ timeout: 6000 }); return true; } catch (e) {}
@@ -149,7 +173,7 @@ async function actPlan(frame, plan, snap, task) {
         await clickAid(frame, a.id); await frame.waitForTimeout(800);
         if (!(await pickOption(frame, v))) { await frame.page().keyboard.type(v.slice(0, 25), { delay: 40 }); await frame.waitForTimeout(1000); if (!(await pickOption(frame, v))) { await frame.page().keyboard.press("Enter"); } }
       }
-      else if (f.type === "combo") { await loc.click({ timeout: 4000 }).catch(() => {}); await loc.fill(""); await loc.pressSequentially(v.slice(0, 30), { delay: 35 }); await frame.waitForTimeout(1000); if (!(await pickOption(frame, v))) await loc.press("Enter"); }
+      else if (f.type === "combo") { if (!(await pickCombo(frame, loc, v))) continue; }
       else { await loc.fill(v, { timeout: 6000 }); await loc.dispatchEvent("blur").catch(() => {}); }
       n++;
     } catch (e) { // fall back to the in-page setter
@@ -216,7 +240,8 @@ async function aiAgent(page, ctx, P, kept, opts = {}) {
     const res = await actPlan(bf, plan, best, opts.task || { files: [] });
     hist.push({ step: round, filled: (plan.fill || []).map((x) => { const fd = best.fields.find((y) => y.id === x.id); return (fd ? fd.label.slice(0, 80) : x.id) + " = " + (fd && fd.type === "password" ? "••••••" : String(x.value).slice(0, 80)); }), clicked: res.clicked, note: plan.note || "" });
     await P(Math.min(90, 51 + round * 2), `AI agent · step ${round}: filled ${res.filled}${res.clicked ? ` · clicked “${res.clicked}”` : ""}`);
-    await page.waitForTimeout(3500);
+    await page.waitForTimeout(900);
+    if (res.clicked) { await page.waitForLoadState("domcontentloaded", { timeout: 8000 }).catch(() => {}); await page.waitForLoadState("networkidle", { timeout: 2500 }).catch(() => {}); }
   }
   return { status: "stuck", reason: "form", detail: "the application has too many steps", ask: [...asks.values()], hist, usedPw };
 }
@@ -336,9 +361,17 @@ for (const d of queued.docs) {
     }
     const user = (await ref.parent.parent.get()).data() || {};
     const profile = user.profile || {};
-    await P(5, "Building your tailored resume and cover letter PDFs");
-    const files = await pdfPage.evaluate(async (x) => window.makeFiles(x.profile, x.override, x.tid, x.letter, x.job),
-      { profile, override: a.pack.resume, tid: a.templateId || (user.settings || {}).applyTemplateId || "meridian", letter: a.pack.coverLetter, job: { title: job.title, company: job.company } });
+    const tid = a.templateId || (user.settings || {}).applyTemplateId || "meridian";
+    const fileKey = crypto.createHash("sha1").update(JSON.stringify([profile, a.pack.resume, a.pack.coverLetter, tid, job.company, job.title])).digest("hex");
+    const fref = ref.parent.parent.collection("files").doc(d.id);
+    let files = null;
+    try { const c = await fref.get(); if (c.exists && c.data().key === fileKey) { files = c.data().files; console.log("  reused PDFs for " + job.company); await P(5, "Using your tailored resume and cover letter (already built)"); } } catch (e) {}
+    if (!files) {
+      await P(5, "Building your tailored resume and cover letter PDFs");
+      files = await pdfPage.evaluate(async (x) => window.makeFiles(x.profile, x.override, x.tid, x.letter, x.job),
+        { profile, override: a.pack.resume, tid, letter: a.pack.coverLetter, job: { title: job.title, company: job.company } });
+      if (JSON.stringify(files).length < 900000) fref.set({ key: fileKey, files, at: Date.now() }).catch(() => {});
+    }
     const base = slug(profile.name || "Resume");
     const extra = { ...((await ref.parent.parent.get()).data() || {}).learned }; (a.formAnswers || []).forEach((x) => { if (x && x.q && x.a) extra[x.q] = x.a; });
     const task = { extra, taskId: d.id, url: job.url, ats: job.ats, company: job.company, title: job.title, location: job.location || "", autoSubmit: true, submitAny: true, background: true,
@@ -366,8 +399,8 @@ for (const d of queued.docs) {
     await P(7, "Opening " + new URL(target).hostname);
     await page.goto(target, { waitUntil: "domcontentloaded", timeout: 60000 });
     let result = null, filledAt = 0, lastAct = Date.now(), seen = 0;
-    for (let i = 0; i < 150 && !result; i++) { // up to ~5 min: multi-page forms
-      await page.waitForTimeout(2000);
+    for (let i = 0; i < 200 && !result; i++) { // up to ~5 min: multi-page forms
+      await page.waitForTimeout(1500);
       const pr = (await Promise.all(page.frames().map((f) => f.evaluate(() => { const x = window.__applyraProgress || []; window.__applyraProgress = []; return x; }).catch(() => [])))).flat().filter(Boolean);
       for (const x of pr) await P(x.pct, x.text);
       if (pr.length) { filledAt = 0; lastAct = Date.now(); } // still moving through pages — don't treat an earlier page's report as final
@@ -375,8 +408,8 @@ for (const d of queued.docs) {
       const sub = all.find((r) => r.status === "submitted"); if (sub) { result = sub; break; }
       const filled = all.filter((r) => r.status === "filled" || r.status === "failed").pop();
       if (all.length !== seen) { seen = all.length; lastAct = Date.now(); }
-      if (filled) { if (!filledAt) filledAt = Date.now(); else if (Date.now() - filledAt > 12000) result = filled; }
-      if (!result && Date.now() - lastAct > 25000) break; // nothing happening for 25 s — hand over to the AI agent
+      if (filled) { if (!filledAt) filledAt = Date.now(); else if (Date.now() - filledAt > 6000) result = filled; }
+      if (!result && Date.now() - lastAct > 15000) break; // nothing happening for 15 s — hand over to the AI agent
     }
     /* AI step: answer the remaining questions, re-fill and submit */
     let aiNote = "", aiLog = null;
@@ -417,6 +450,8 @@ for (const d of queued.docs) {
       if (!AI_OK()) aiNote = " (the AI agent needs your Gemini key on the runner — run update-runner.sh)";
       else {
         await P(50, "AI agent taking over to finish the application");
+        await ctx.addInitScript({ content: "window.__applyraAgent = true;" }).catch(() => {});
+        await Promise.all(page.frames().map((f) => f.evaluate(() => { window.__applyraAgent = true; }).catch(() => {})));
         const host = (() => { try { return new URL(page.url()).hostname; } catch (e) { return new URL(target).hostname; } })();
         if (accountsOn && !/linkedin|google|naukri|indeed|facebook/.test(host)) account = await siteAccount(ref.parent.parent, host, files.R.email || profile.email).catch(() => null);
         const ag = await aiAgent(page, { siteAccount: account ? { email: account.email, password: account.password, existing: account.existing } : undefined, profile: files.R, standardAnswers: user.screening || {}, learnedAnswers: user.learned || {}, formAnswers: a.formAnswers || [], preferences: { modes: (user.prefs || {}).modes, locations: (user.prefs || {}).locations, overseas: (user.prefs || {}).overseas },

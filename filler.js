@@ -186,23 +186,48 @@
   const optLabel = (r) => { const R = (r.getRootNode && r.getRootNode()) || document; return String((r.id && ((R.querySelector ? R : document).querySelector(`label[for="${CSS.escape(r.id)}"]`) || document.querySelector(`label[for="${CSS.escape(r.id)}"]`)) || r.closest("label") || {}).innerText || r.value || "").trim(); };
   const isRequired = (el) => el.required || el.getAttribute("aria-required") === "true" || /\*\s*$/.test((describe(el).split(" | ")[0] || ""));
 
+  /* The answer a type-ahead dropdown is showing. React-Select (Greenhouse, Lever, Ashby…) clears the typed text after a pick
+     and shows the choice in a separate element — so the input's own value is always empty. */
+  function comboValue(el) {
+    let n = el;
+    for (let i = 0; n && i < 6; i++, n = n.parentElement) {
+      const vs = [...n.querySelectorAll("[class*='single-value' i], [class*='singleValue'], [class*='multi-value__label' i], [class*='multiValue__label' i], [class*='MultiValueLabel']")].map((x) => norm(x.innerText)).filter(Boolean);
+      if (vs.length) return vs.join(", ");
+      if (n.matches && n.matches("[class*='control' i], [class*='container' i]") && n.querySelector("[role=combobox]") && i >= 2) break;
+    }
+    return "";
+  }
+  window.__applyraComboValue = comboValue;
+  const comboTries = new Map();
+  async function waitOptions(ms = 4500) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < ms) {
+      const loading = qa("[class*='loading' i], [class*='menu-notice' i]").filter(visible).some((x) => /loading|searching/i.test(x.innerText || ""));
+      const opts = qa("[role=option]").filter(visible);
+      if (opts.length && !loading) return opts;
+      await sleep(250);
+    }
+    return qa("[role=option]").filter(visible);
+  }
+  const pressOn = (o) => { ["mousedown", "mouseup", "click"].forEach((t) => o.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true }))); };
   async function fillCombos() {
     let filled = 0; const missing = [], missDet = [];
     const miss = (el) => { const q = describe(el).split(" | ")[0]; missing.push(q); missDet.push({ q, type: "short", options: [], maxLength: 0 }); };
     for (const el of combos.slice()) {
       if (filledEls.has(el) || !el.isConnected) continue;
-      const box = el.closest("[class*='select'], [class*='Select'], .field, div");
-      if (box && box.querySelector("[class*='single-value'], [class*='singleValue']")) { filledEls.add(el); continue; }
-      const v = valueFor(el), req = isRequired(el) || /\*\s*$/.test(describe(el).split(" | ")[0] || "");
-      if (v == null || v === "") { if (req) miss(el); continue; }
+      if (comboValue(el)) { filledEls.add(el); continue; } // already answered — never re-type (that erases the choice)
+      const q0 = describe(el).split(" | ")[0], tries = comboTries.get(q0) || 0;
+      const v = valueFor(el), req = isRequired(el) || /\*\s*$/.test(q0 || "");
+      if (v == null || v === "" || tries >= 2) { if (req) miss(el); continue; }
+      comboTries.set(q0, tries + 1);
       const want = norm(v).slice(0, 40);
       el.focus(); el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })); setNative(el, want.split(/[,(]/)[0].trim().slice(0, 25));
-      await sleep(700);
-      const opts = qa("[role=option]").filter(visible);
+      const opts = await waitOptions();
       const o = opts.find((x) => norm(x.innerText) === want) || opts.find((x) => norm(x.innerText).startsWith(want) || want.startsWith(norm(x.innerText))) ||
         (/^yes/.test(want) && opts.find((x) => /^yes/i.test(x.innerText))) || (/^no\b/.test(want) && opts.find((x) => /^no\b/i.test(x.innerText))) ||
         (/prefer not|decline/.test(want) && opts.find((x) => /prefer not|decline|not to/i.test(x.innerText))) || (opts.length === 1 ? opts[0] : null);
-      if (o) { o.click(); filledEls.add(el); filled++; } else { el.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); if (req) miss(el); }
+      if (o) { pressOn(o); await sleep(300); if (comboValue(el)) { filledEls.add(el); filled++; } else if (req) miss(el); }
+      else { el.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); if (req) miss(el); }
       await sleep(250);
     }
     return { filled, missing, missDet };
@@ -366,6 +391,7 @@
   let rerun = false;
   async function run(manual = false) {
     if (submitted) return;
+    if (window.__applyraAgent) return; // the cloud AI agent is driving this page
     if (running) { rerun = true; return; } // the page changed while busy — go again when free
     running = true; rerun = false; loadFlow();
     try {
@@ -438,7 +464,7 @@
       const f = { id: aid(el), label: (t === "checkbox" ? describe(el) : (describe(el).split(" | ")[0] || describe(el))).slice(0, 200), type: el.tagName === "SELECT" ? "select" : el.tagName === "TEXTAREA" ? "textarea" : t,
         value: t === "checkbox" ? String(el.checked) : String(el.tagName === "SELECT" ? (((o) => (o && o.value !== "" && !/^(select|choose|--|please)/i.test(o.text.trim()) ? o.text : ""))(el.options[el.selectedIndex])) : el.value || "").slice(0, 200), required: isRequired(el), error: errNear(el) || (el.getAttribute("aria-invalid") === "true" ? "invalid" : "") };
       if (el.tagName === "SELECT") f.options = [...el.options].filter((o) => o.value !== "" && !/^(select|choose|--)/i.test(o.text.trim())).map((o) => o.text.trim()).slice(0, 40);
-      if (el.getAttribute("role") === "combobox" || el.getAttribute("aria-autocomplete")) f.type = "combo";
+      if (el.getAttribute("role") === "combobox" || el.getAttribute("aria-autocomplete")) { f.type = "combo"; f.value = comboValue(el); if (f.value && f.error === "") f.error = ""; }
       const ml = Number(el.getAttribute("maxlength")) || 0; if (ml > 0) f.maxLength = ml;
       if (el.getAttribute("pattern")) f.pattern = el.getAttribute("pattern");
       out.fields.push(f);
@@ -462,9 +488,10 @@
         else if (t === "checkbox") { const want = /^(true|yes|1|checked|on)$/i.test(v); if (el.checked !== want) { el.click(); n++; } }
         else if (t === "file") { const role = /cover/.test(v) ? "cover" : "resume"; const f = task && task.files && task.files.find((x) => x.role === role); if (f) { attach(el, b64ToFile(f)); n++; } }
         else if (el.getAttribute("role") === "combobox" || el.getAttribute("aria-autocomplete")) {
-          el.focus(); el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })); setNative(el, v.slice(0, 30)); await sleep(900);
-          const w = norm(v); const o = qa("[role=option]").filter(visible); const pick = o.find((x) => norm(x.innerText) === w) || o.find((x) => norm(x.innerText).includes(w) || w.includes(norm(x.innerText))) || o[0];
-          if (pick) { pick.click(); n++; } else { el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); }
+          if (comboValue(el) && norm(comboValue(el)).includes(norm(v))) { n++; continue; }
+          el.focus(); el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })); setNative(el, v.slice(0, 30));
+          const w = norm(v); const o = await waitOptions(); const pick = o.find((x) => norm(x.innerText) === w) || o.find((x) => norm(x.innerText).includes(w) || w.includes(norm(x.innerText))) || (o.length === 1 ? o[0] : null);
+          if (pick) { pressOn(pick); n++; } else { el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); }
         } else { setNative(el, v); n++; }
         filledEls.add(el);
       } catch (e) {}
