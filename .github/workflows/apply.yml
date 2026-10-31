@@ -9,7 +9,7 @@ concurrency:
 jobs:
   apply:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -37,3 +37,5 @@ jobs:
           FIREBASE_SA: ${{ secrets.FIREBASE_SA }}
           APP_URL: ${{ vars.APP_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
+          APPLYRA_RUNNER_SECRET: ${{ secrets.APPLYRA_RUNNER_SECRET }}

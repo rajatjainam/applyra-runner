@@ -15,6 +15,8 @@ if ! gh secret list --repo "$REPO" 2>/dev/null | grep -q '^GEMINI_API_KEY'; then
   read -rs GK; echo
   [ -n "$GK" ] && printf '%s' "$GK" | gh secret set GEMINI_API_KEY --repo "$REPO" && echo "  ✔ Gemini key saved as a private GitHub secret"
 fi
+K2=$(node -e 'try{process.stdout.write(require(process.env.HOME+"/.applyra-gas.json").GEMINI_API_KEY_2||"")}catch(e){}' 2>/dev/null || true)
+if [ -n "$K2" ]; then printf '%s' "$K2" | gh secret set GEMINI_API_KEY_2 --repo "$REPO" >/dev/null && echo "  ✔ Second Gemini key shared with the cloud runner"; fi
 PROJECT_ID=$(cat ../.applyra-project 2>/dev/null || gcloud config get-value project 2>/dev/null)
 FS="https://firestore.googleapis.com/v1/projects/$PROJECT_ID/databases/(default)/documents/private/github"
 AT=$(gcloud auth print-access-token)
@@ -30,8 +32,16 @@ if [ "$HAVE" != "200" ] || [ "${NEW_TOKEN:-}" = "1" ]; then
     CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $GT" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$REPO/actions/workflows")
     if [ "$CODE" = "200" ]; then
       curl -s -o /dev/null -X PATCH -H "Authorization: Bearer $AT" -H "x-goog-user-project: $PROJECT_ID" -H "Content-Type: application/json" \
-        -d "{\"fields\":{\"token\":{\"stringValue\":\"$GT\"},\"repo\":{\"stringValue\":\"$REPO\"}}}" "$FS" && echo "  ✔ Instant start is on"
+        -d "{\"fields\":{\"token\":{\"stringValue\":\"$GT\"},\"repo\":{\"stringValue\":\"$REPO\"}}}" "$FS?updateMask.fieldPaths=token&updateMask.fieldPaths=repo" && echo "  ✔ Instant start is on"
     else echo "  ✗ That token can't reach $REPO (GitHub said $CODE) — run again with:  NEW_TOKEN=1 bash ~/applyra/runner/update-runner.sh"; fi
   fi
+fi
+# Robot ↔ backend secret (AI with your backend Gemini keys, Gmail verification codes, LinkedIn → company-site links)
+HAS_RS=$(curl -s -H "Authorization: Bearer $AT" -H "x-goog-user-project: $PROJECT_ID" "$FS" | grep -c '"runnerSecret"' || true)
+if [ "$HAS_RS" = "0" ] || ! gh secret list --repo "$REPO" 2>/dev/null | grep -q '^APPLYRA_RUNNER_SECRET'; then
+  RS=$(openssl rand -hex 24)
+  curl -s -o /dev/null -X PATCH -H "Authorization: Bearer $AT" -H "x-goog-user-project: $PROJECT_ID" -H "Content-Type: application/json" \
+    -d "{\"fields\":{\"runnerSecret\":{\"stringValue\":\"$RS\"}}}" "$FS?updateMask.fieldPaths=runnerSecret"
+  printf '%s' "$RS" | gh secret set APPLYRA_RUNNER_SECRET --repo "$REPO" >/dev/null && echo "  ✔ Robot ↔ backend link set up (AI fallback, email codes, LinkedIn company links)"
 fi
 gh workflow run apply.yml --repo "$REPO" && echo -e "\n\e[32m✔ Runner updated and a run started.\e[0m Watch it: https://github.com/$REPO/actions"
